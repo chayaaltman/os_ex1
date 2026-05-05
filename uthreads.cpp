@@ -17,8 +17,6 @@
 
 
 #ifdef __x86_64__
-
-static void block_timer();
 typedef unsigned long address_t;
 
 #define JB_SP 6
@@ -60,16 +58,18 @@ int global_quantum_usecs = 0;
 int global_quantums = 0;
 
 
+static void block_timer(){
+    sigset_t set;
+    sigemptyset(&set);
+    sigaddset(&set,SIGVTALRM);
+    sigprocmask(SIG_BLOCK,&set,NULL);
+}
 
-void timer_handler(int sig)
-{
-    // Block SIGVTALRM to prevent re-entrant signal delivery
-    block_timer();
-    if (duplicate_thread != nullptr) {
-        delete duplicate_thread;
-        duplicate_thread = nullptr;
-    }
-    context_switch(true);
+static void unblock_timer(){
+    sigset_t set;
+    sigemptyset(&set);
+    sigaddset(&set,SIGVTALRM);
+    sigprocmask(SIG_UNBLOCK,&set,NULL);
 }
 
 static void reset_timer(){
@@ -84,19 +84,17 @@ static void reset_timer(){
     }
 }
 
-static void block_timer(){
-    sigset_t set;
-    sigemptyset(&set);
-    sigaddset(&set,SIGVTALRM);
-    sigprocmask(SIG_BLOCK,&set,NULL);
+void timer_handler(int sig)
+{
+    // Block SIGVTALRM to prevent re-entrant signal delivery
+    block_timer();
+    if (duplicate_thread != nullptr) {
+        delete duplicate_thread;
+        duplicate_thread = nullptr;
+    }
+    context_switch(true);
 }
 
-static void unblock_timer(){
-    sigset_t set;
-    sigemptyset(&set);
-    sigaddset(&set,SIGVTALRM);
-    sigprocmask(SIG_UNBLOCK,&set,NULL);
-}
 
 
 struct TimerManager{
@@ -407,19 +405,6 @@ int uthread_sleep(int num_quantums) {
         delete duplicate_thread;
         duplicate_thread = nullptr;
     }
-    for(int i = 0; i < MAX_THREAD_NUM; ++i){
-        Thread* t = allThreads[i];
-        
-        if(t != nullptr && t->state == STATES::BLOCKED && t->wake_quantum != -1 && t->wake_quantum <= global_quantums){
-            t->wake_quantum = -1;
-            t->sleep_flag = false;
-            if(t->blocked_flag == false){
-                t->state = STATES::READY;
-                threadQueue.push_back(i);
-            }
-            
-        }
-    }
 
     Thread* current = allThreads[running_tid];
 
@@ -437,6 +422,7 @@ int uthread_sleep(int num_quantums) {
         threadQueue.push_back(running_tid);
     }
 
+    // 1. Scheduler picks next thread (BEFORE waking threads are considered)
     running_tid = threadQueue.front();
     threadQueue.pop_front();
 
@@ -445,6 +431,20 @@ int uthread_sleep(int num_quantums) {
     next->quantum_count++;
     global_quantums++;
 
+    // 2. NOW wake sleeping threads whose quota has expired, adding to END of queue
+    for(int i = 0; i < MAX_THREAD_NUM; ++i){
+        Thread* t = allThreads[i];
+        
+        if(t != nullptr && t->state == STATES::BLOCKED && t->wake_quantum != -1 && t->wake_quantum <= global_quantums){
+            t->wake_quantum = -1;
+            t->sleep_flag = false;
+            if(t->blocked_flag == false){
+                t->state = STATES::READY;
+                threadQueue.push_back(i);
+            }
+            
+        }
+    }
 
     reset_timer();
     siglongjmp(next->env, 1);
