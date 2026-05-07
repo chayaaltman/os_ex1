@@ -1,4 +1,3 @@
-
 #include "uthreads.h"
 #include <stdlib.h>
 #include <deque>
@@ -14,9 +13,12 @@
 #define INVALID_ARGUMENT "invalid argument"
 #define MAX_SIZE_ERR "thread queue reached the max capacity"
 #define ID_NOT_FOUND "ID does not exist"
-
+#define SIGACTION_ERR "sigaction failed"
+#define MAIN_THREAD_ERR "cannot block main thread"
 
 #ifdef __x86_64__
+
+static void block_timer();
 typedef unsigned long address_t;
 
 #define JB_SP 6
@@ -57,7 +59,12 @@ int running_tid = 0;
 int global_quantum_usecs = 0;
 int global_quantums = 0;
 
-
+/**
+ * @brief Blocks the virtual timer signal (SIGVTALRM).
+ *
+ * Prevents timer interrupts from being delivered, typically used
+ * during critical sections to avoid race conditions.
+ */
 static void block_timer(){
     sigset_t set;
     sigemptyset(&set);
@@ -65,6 +72,13 @@ static void block_timer(){
     sigprocmask(SIG_BLOCK,&set,NULL);
 }
 
+
+/**
+ * @brief Unblocks the virtual timer signal (SIGVTALRM).
+ *
+ * Re-enables delivery of timer interrupts after being blocked,
+ * allowing preemptive scheduling to continue.
+ */
 static void unblock_timer(){
     sigset_t set;
     sigemptyset(&set);
@@ -72,6 +86,12 @@ static void unblock_timer(){
     sigprocmask(SIG_UNBLOCK,&set,NULL);
 }
 
+
+/**
+ * @brief Resets and starts the virtual timer.
+ *
+ * Configures the timer according to the global quantum length and restarts it.
+ */
 static void reset_timer(){
     struct itimerval timer;
     timer.it_value.tv_sec= global_quantum_usecs/1000000;
@@ -83,6 +103,14 @@ static void reset_timer(){
         exit(1);
     }
 }
+
+
+/**
+ * @brief Handles timer interrupt (SIGVTALRM).
+ *
+ * Performs preemptive scheduling by blocking further signals,
+ * cleaning up temporary thread state, and triggering a context switch.
+ */
 
 void timer_handler(int sig)
 {
@@ -96,6 +124,12 @@ void timer_handler(int sig)
 }
 
 
+
+/**
+ * @brief RAII guard for timer signal blocking.
+ *
+ * Blocks the timer upon construction and automatically unblocks it upon destruction.
+ */
 
 struct TimerManager{
     TimerManager(){block_timer();}
@@ -131,7 +165,7 @@ int uthread_init(int quantum_usecs) {
     struct sigaction sa ={0};
     sa.sa_handler = &timer_handler;
     if (sigaction(SIGVTALRM, &sa, NULL)<0){
-        std::cerr << "thread library error: " << "sigaction failed" << std::endl;
+        std::cerr << "thread library error: " << SIGACTION_ERR << std::endl;
         exit(1);
     }
 
@@ -170,7 +204,6 @@ int uthread_spawn(thread_entry_point entry_point) {
 
 
     Thread* thread = new Thread(next_id, STATES::READY, entry_point);
-    // thread->stack = new char[STACK_SIZE];
     address_t sp = (address_t) thread->stack + STACK_SIZE - sizeof(address_t);
     address_t pc = (address_t) entry_point;
     sigsetjmp(thread->env, 1);
@@ -215,25 +248,7 @@ int uthread_terminate(int tid) {
         threadQueue.end()
     );
 
-    // allThreads[tid]->sleep_flag = false;
-    // allThreads[tid]->blocked_flag = false;
-    // delete allThreads[tid];
-    // allThreads[tid] = nullptr;
-
-    // if (tid == running_tid) {
-    //     running_tid = threadQueue.front();
-    //     threadQueue.pop_front();
-
-    //     Thread* next = allThreads[running_tid];
-    //     next->state = STATES::RUNNING;
-    //     next->quantum_count++;
-    //     global_quantums++;
-
-    //     siglongjmp(next->env, 1);
-    // }
-////////////////////////////////////////
     if (tid == running_tid) {
-        // 1. SAVE IT FOR LATER, DO NOT DELETE YET
         duplicate_thread = allThreads[tid]; 
         allThreads[tid] = nullptr;
 
@@ -245,13 +260,10 @@ int uthread_terminate(int tid) {
         next->quantum_count++;
         global_quantums++;
 
-        reset_timer(); // Ensure the next thread gets a full quantum
+        reset_timer(); 
         siglongjmp(next->env, 1);
-        // NOTE: siglongjmp restores the signal mask saved by sigsetjmp.
-        // For spawned threads, __saved_mask is empty (signals unblocked).
-        // For threads saved in context_switch, signals are unblocked there on resume.
+        
     } else {
-        // Safe to delete immediately because we aren't currently running on it
         delete allThreads[tid]; 
         allThreads[tid] = nullptr;
     }
@@ -274,7 +286,7 @@ int uthread_terminate(int tid) {
 int uthread_block(int tid) {
     TimerManager m;
     if(tid == 0){
-          std::cerr << "thread library error: " << "cannot block main thread" << std::endl;
+          std::cerr << "thread library error: " << MAIN_THREAD_ERR << std::endl;
         return -1;
     }
 
@@ -334,7 +346,7 @@ int uthread_resume(int tid) {
     Thread* t = allThreads[tid];
 
     if (t->state != STATES::BLOCKED) {
-        return 0; // RUNNING or READY, no effect
+        return 0; 
     }
 
     t->blocked_flag = false;
@@ -398,6 +410,9 @@ int uthread_sleep(int num_quantums) {
 
 
  void context_switch(bool requeue){
+    // Block signals for the duration of the context switch to prevent races
+    block_timer();
+
     // Block signals for the duration of the context switch to prevent races
     block_timer();
 
@@ -495,4 +510,3 @@ int uthread_get_quantums(int tid) {
     }
     return allThreads[tid]->quantum_count;
 }
-

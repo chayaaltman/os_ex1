@@ -32,10 +32,8 @@ void reset_library() {
     }
     // 4. Clear all data structures
     for (int i = 0; i < MAX_THREAD_NUM; ++i) {
-        if (allThreads[i] != nullptr) {
-            delete allThreads[i];
-            allThreads[i] = nullptr;
-        }
+        delete allThreads[i];
+        allThreads[i] = nullptr;
     }
     threadQueue.clear();
     running_tid = 0;
