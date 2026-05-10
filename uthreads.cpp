@@ -15,8 +15,16 @@
 #define ID_NOT_FOUND "ID does not exist"
 #define SIGACTION_ERR "sigaction failed"
 #define MAIN_THREAD_ERR "cannot block main thread"
+#define MAIN_THREAD_SLEEP "main thread cannot sleep"
+#define SET_TIMER_ERR "failed to set timer"
 
 #ifdef __x86_64__
+
+/**
+* Global Pointers:
+* - a pointer to a static function to block the timer that is declared here in order for the code to compile properly.
+* - a typedef used in the demo file for the address of a thread.
+*/
 
 static void block_timer();
 typedef unsigned long address_t;
@@ -24,6 +32,10 @@ typedef unsigned long address_t;
 #define JB_SP 6
 #define JB_PC 7
 
+/**
+* @brief
+* A function that translates the address of a given thread, taken from the demo file.
+*/
 address_t translate_address(address_t addr) {
     address_t ret;
     asm volatile("xor    %%fs:0x30,%0\n"
@@ -39,6 +51,10 @@ typedef unsigned int address_t;
 #define JB_SP 4
 #define JB_PC 5
 
+/**
+* @brief
+* A function that translates the address of a given thread, taken from the demo file.
+*/
 address_t translate_address(address_t addr) {
     address_t ret;
     asm volatile("xor    %%gs:0x18,%0\n"
@@ -49,6 +65,15 @@ address_t translate_address(address_t addr) {
 }
 
 #endif
+
+/**
+* Global variables:
+* - A queue for the 'READY' status threads, that are waiting for execution, used with their ID.
+* - A vector to store all the reads, that has a max capacity of 'MAX_THREAD_NUM'.
+* - a global variable for the running thread.
+* - a global variable for the numbers of usecs a quantum will fill.
+* - a global variable for the amount of quantums that have passed globally.
+*/
 
 std::deque<int> threadQueue;
 std::vector<Thread*> allThreads(MAX_THREAD_NUM, nullptr);
@@ -99,7 +124,7 @@ static void reset_timer(){
     timer.it_interval.tv_sec= global_quantum_usecs/1000000;
     timer.it_interval.tv_usec= global_quantum_usecs%1000000;
     if (setitimer( ITIMER_VIRTUAL, &timer, NULL)<0){
-        std::cerr << "thread library error: " << "set timer failed" << std::endl;
+        std::cerr << "thread library error: " << SET_TIMER_ERR << std::endl;
         exit(1);
     }
 }
@@ -114,7 +139,6 @@ static void reset_timer(){
 
 void timer_handler(int sig)
 {
-    // Block SIGVTALRM to prevent re-entrant signal delivery
     block_timer();
     if (duplicate_thread != nullptr) {
         delete duplicate_thread;
@@ -126,7 +150,7 @@ void timer_handler(int sig)
 
 
 /**
- * @brief RAII guard for timer signal blocking.
+ * @brief A guard for timer signal blocking.
  *
  * Blocks the timer upon construction and automatically unblocks it upon destruction.
  */
@@ -304,8 +328,6 @@ int uthread_block(int tid) {
         return 0;
     }
 
-
-    // Remove from READY queue if it is there
     if(allThreads[tid]->state == STATES::READY){
         threadQueue.erase(std::remove(threadQueue.begin(), threadQueue.end(), tid),
         threadQueue.end()
@@ -384,7 +406,7 @@ int uthread_sleep(int num_quantums) {
         return -1;
     }
     if(running_tid == 0 && num_quantums != 0){
-        std::cerr << "thread library error: " << "main thread cannot sleep" << std::endl;
+        std::cerr << "thread library error: " << MAIN_THREAD_SLEEP << std::endl;
         return -1;
     }
     if(num_quantums == 0){
@@ -413,9 +435,6 @@ int uthread_sleep(int num_quantums) {
     // Block signals for the duration of the context switch to prevent races
     block_timer();
 
-    // Block signals for the duration of the context switch to prevent races
-    block_timer();
-
     if (duplicate_thread != nullptr) {
         delete duplicate_thread;
         duplicate_thread = nullptr;
@@ -425,9 +444,6 @@ int uthread_sleep(int num_quantums) {
 
     int ret = sigsetjmp(current->env, 1);
     if (ret != 0) {
-        // Resumed here via siglongjmp. Signal mask was restored to blocked
-        // (since we blocked at the top of context_switch before sigsetjmp).
-        // Unblock now that we're safely back.
         unblock_timer();
         return; 
     }
@@ -437,7 +453,6 @@ int uthread_sleep(int num_quantums) {
         threadQueue.push_back(running_tid);
     }
 
-    // 1. Scheduler picks next thread (BEFORE waking threads are considered)
     running_tid = threadQueue.front();
     threadQueue.pop_front();
 
@@ -446,7 +461,6 @@ int uthread_sleep(int num_quantums) {
     next->quantum_count++;
     global_quantums++;
 
-    // 2. NOW wake sleeping threads whose quota has expired, adding to END of queue
     for(int i = 0; i < MAX_THREAD_NUM; ++i){
         Thread* t = allThreads[i];
         
@@ -463,9 +477,6 @@ int uthread_sleep(int num_quantums) {
 
     reset_timer();
     siglongjmp(next->env, 1);
-    // siglongjmp restores the saved signal mask from sigsetjmp.
-    // Spawned threads have empty mask (unblocked); previously-switched
-    // threads will unblock in the sigsetjmp return path above.
 }
 
 
